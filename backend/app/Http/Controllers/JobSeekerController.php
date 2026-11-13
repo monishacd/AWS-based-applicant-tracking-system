@@ -26,7 +26,7 @@ class JobSeekerController extends Controller
         $user = $request->user();
         $latestResume = Candidate::where('user_id', $user->id)
             ->latest()
-            ->first(['id', 'status', 'parsed_name', 'extracted_skills_json', 'created_at', 'error']);
+            ->first(['id', 'status', 'parsed_name', 'parsed_email', 'parsed_phone', 'parsed_education_json', 'parsed_experience_json', 'extracted_skills_json', 'created_at', 'error']);
 
         return response()->json([
             'user' => $user,
@@ -76,7 +76,7 @@ class JobSeekerController extends Controller
     public function uploadResume(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'resume' => ['required', 'file', 'mimes:pdf,doc,docx', 'max:10240'],
+            'resume' => ['required', 'file', 'mimes:pdf,doc,docx', 'extensions:pdf,doc,docx', 'max:10240'],
         ]);
         if ($validator->fails()) {
             return response()->json(['message' => 'Validation failed', 'errors' => $validator->errors()], 422);
@@ -141,7 +141,12 @@ class JobSeekerController extends Controller
         )));
         $appliedIds = Application::where('user_id', $user->id)->pluck('job_id')->all();
 
-        $recommendations = Job::where('status', 'open')
+        $jobs = Job::where('status', 'open');
+        if ($jobIdRange = $user->jobIdRange()) {
+            $jobs->whereBetween('id', $jobIdRange);
+        }
+
+        $recommendations = $jobs
             ->with('user:id,company_name')
             ->latest()
             ->get()
@@ -189,7 +194,11 @@ class JobSeekerController extends Controller
 
     public function applications(Request $request)
     {
-        $applications = Application::with(['job.user:id,company_name', 'candidate:id,parsed_name,extracted_skills_json,status'])
+        $applications = Application::with([
+            'job.user:id,company_name,location',
+            'job:id,user_id,title,department,employment_type,description,required_skills_json,experience_requirements,status',
+            'candidate:id,parsed_name,extracted_skills_json,status,resume_path',
+        ])
             ->where('user_id', $request->user()->id)
             ->latest()
             ->get();
@@ -203,16 +212,69 @@ class JobSeekerController extends Controller
             return response()->json(['message' => 'This job is no longer accepting applications.'], 422);
         }
 
-        $candidate = Candidate::where('user_id', $request->user()->id)
-            ->where('status', 'done')
-            ->latest()
-            ->first();
-        if (!$candidate) {
-            return response()->json(['message' => 'Upload a readable resume before applying.'], 422);
-        }
-
         if (Application::where('user_id', $request->user()->id)->where('job_id', $job->id)->exists()) {
             return response()->json(['message' => 'You have already applied for this job.'], 409);
+        }
+
+        $candidate = null;
+
+        // Check if a new resume was uploaded directly during application
+        if ($request->hasFile('resume')) {
+            $validator = Validator::make($request->all(), [
+                'resume' => ['required', 'file', 'mimes:pdf,doc,docx', 'extensions:pdf,doc,docx', 'max:10240'],
+            ]);
+            if ($validator->fails()) {
+                return response()->json(['message' => 'Validation failed', 'errors' => $validator->errors()], 422);
+            }
+
+            $file = $request->file('resume');
+            $path = $file->store('resumes', 'local');
+
+            try {
+                $text = $this->resumeParser->extractText(Storage::disk('local')->path($path), $file->getClientOriginalExtension());
+                if (trim($text) === '') {
+                    Storage::disk('local')->delete($path);
+                    return response()->json(['message' => 'No readable text was found in the uploaded resume.'], 422);
+                }
+
+                $candidate = Candidate::create([
+                    'user_id' => $request->user()->id,
+                    'resume_path' => $path,
+                    'resume_text' => $text,
+                    'status' => 'done',
+                ]);
+
+                $analysis = $this->matcher->match($text, '', '', []);
+                $skills = $analysis['skills'] ?? [];
+                $candidate->update([
+                    'parsed_name' => $analysis['name'] ?? $request->user()->name,
+                    'parsed_email' => $analysis['email'] ?? $request->user()->email,
+                    'parsed_phone' => $analysis['phone'] ?? null,
+                    'parsed_education_json' => $analysis['education'] ?? [],
+                    'parsed_experience_json' => $analysis['experience'] ?? [],
+                    'extracted_skills_json' => $skills,
+                ]);
+
+                if (!empty($skills)) {
+                    $request->user()->update([
+                        'skills_json' => array_values(array_unique(array_merge($request->user()->skills_json ?? [], $skills))),
+                    ]);
+                }
+            } catch (\Throwable $exception) {
+                Storage::disk('local')->delete($path);
+                report($exception);
+                return response()->json(['message' => 'The uploaded resume could not be processed.'], 422);
+            }
+        } else {
+            // Use existing profile resume
+            $candidate = Candidate::where('user_id', $request->user()->id)
+                ->where('status', 'done')
+                ->latest()
+                ->first();
+
+            if (!$candidate) {
+                return response()->json(['message' => 'No profile resume found. Please upload a resume to apply.'], 422);
+            }
         }
 
         $payload = $this->matcher->match(
@@ -230,6 +292,11 @@ class JobSeekerController extends Controller
                 'raw_json' => $payload,
             ],
         );
+
+        $newScore = (int) ($payload['match_percentage'] ?? 0);
+        if ($newScore > (int) $candidate->ai_match_percentage) {
+            $candidate->update(['ai_match_percentage' => $newScore]);
+        }
         $application = Application::create([
             'user_id' => $request->user()->id,
             'candidate_id' => $candidate->id,
@@ -241,6 +308,57 @@ class JobSeekerController extends Controller
             'application' => $application->load(['job.user:id,company_name', 'candidate:id,parsed_name']),
             'match' => $match,
         ], 201);
+    }
+
+    public function acceptOffer(Request $request, Application $application)
+    {
+        abort_unless($application->user_id === $request->user()->id, 403);
+
+        if ($application->status !== 'cleared') {
+            return response()->json(['message' => 'This application is not in cleared status.'], 422);
+        }
+
+        if ($application->offer_accepted_at) {
+            return response()->json(['message' => 'Offer letter has already been accepted.'], 422);
+        }
+
+        if ($application->offer_declined_at) {
+            return response()->json(['message' => 'Offer letter was previously declined.'], 422);
+        }
+
+        $application->update([
+            'offer_accepted_at' => now(),
+            'offer_declined_at' => null,
+            'offer_decline_reason' => null,
+        ]);
+
+        return response()->json([
+            'message' => 'Congratulations! You have accepted the offer letter.',
+            'application' => $application->fresh()->load(['job.user:id,company_name', 'candidate:id,parsed_name']),
+        ]);
+    }
+
+    public function rejectOffer(Request $request, Application $application)
+    {
+        abort_unless($application->user_id === $request->user()->id, 403);
+
+        if ($application->status !== 'cleared') {
+            return response()->json(['message' => 'This application does not have an active offer to reject.'], 422);
+        }
+
+        if ($application->offer_accepted_at) {
+            return response()->json(['message' => 'Offer letter has already been accepted and cannot be rejected.'], 422);
+        }
+
+        $application->update([
+            'offer_declined_at' => now(),
+            'offer_decline_reason' => $request->input('reason', 'Candidate declined offer terms.'),
+        ]);
+
+        return response()->json([
+            'message' => 'You have declined the offer letter.',
+            'application' => $application->fresh()->load(['job.user:id,company_name', 'candidate:id,parsed_name']),
+        ]);
     }
 
     public function downloadResume(Request $request, Candidate $candidate)

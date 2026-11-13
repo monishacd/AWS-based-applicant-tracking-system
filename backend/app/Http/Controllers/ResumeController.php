@@ -26,7 +26,7 @@ class ResumeController extends Controller
     public function upload(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'resume' => ['required', 'file', 'mimes:pdf,doc,docx', 'max:10240'],
+            'resume' => ['required', 'file', 'mimes:pdf,doc,docx', 'extensions:pdf,doc,docx', 'max:10240'],
             'job_id' => ['nullable', 'exists:jobs,id'],
         ]);
 
@@ -35,8 +35,8 @@ class ResumeController extends Controller
         }
 
         if ($request->job_id) {
-            $job = Job::find($request->job_id);
-            if (!$job || $job->user_id !== $request->user()->id) {
+            $jobAccessible = Job::accessibleToRecruiter($request->user())->whereKey($request->job_id)->exists();
+            if (! $jobAccessible) {
                 return response()->json(['message' => 'Invalid job'], 422);
             }
         }
@@ -59,16 +59,26 @@ class ResumeController extends Controller
     public function status(Candidate $candidate, Request $request)
     {
         if ($candidate->user_id !== $request->user()->id && !$candidate->applications()
-            ->whereHas('job', fn ($jobs) => $jobs->where('user_id', $request->user()->id))
+            ->whereHas('job', fn ($jobs) => $jobs->accessibleToRecruiter($request->user()))
             ->exists()) {
             return response()->json(['message' => 'Forbidden'], 403);
         }
 
         if ($candidate->status !== 'parsing') {
-            return response()->json(['candidate' => $candidate->load('matches.job')], 200);
+            return response()->json([
+                'candidate' => $candidate->load([
+                    'matches' => fn ($matches) => $matches
+                        ->whereHas('job', fn ($jobs) => $jobs->accessibleToRecruiter($request->user()))
+                        ->with('job'),
+                ]),
+            ], 200);
         }
 
-        $jobs = Job::where('user_id', $request->user()->id)->where('status', 'open')->get();
+        $jobs = Job::accessibleToRecruiter($request->user())->where('status', 'open');
+        if ($jobIdRange = $request->user()->jobIdRange()) {
+            $jobs->whereBetween('id', $jobIdRange);
+        }
+        $jobs = $jobs->get();
 
         if ($jobs->isEmpty()) {
             $candidate->update(['status' => 'failed', 'error' => 'No open jobs found. Create a job first.']);
@@ -161,7 +171,13 @@ class ResumeController extends Controller
                 'parsed_phone' => $firstPayload['phone'] ?? null,
             ]);
 
-            return response()->json(['candidate' => $candidate->fresh()->load('matches.job')], 200);
+            $candidate = $candidate->fresh()->load([
+                'matches' => fn ($matches) => $matches
+                    ->whereHas('job', fn ($jobs) => $jobs->accessibleToRecruiter($request->user()))
+                    ->with('job'),
+            ]);
+
+            return response()->json(['candidate' => $candidate], 200);
         } catch (\Throwable $e) {
             Log::error('Resume parsing failed', ['error' => $e->getMessage(), 'candidate_id' => $candidate->id]);
             $candidate->update(['status' => 'failed', 'error' => $e->getMessage()]);
@@ -174,40 +190,48 @@ class ResumeController extends Controller
     {
         $jobId = $request->query('job_id');
 
-        $jobQuery = Job::where('user_id', $request->user()->id);
+        $jobsQuery = Job::accessibleToRecruiter($request->user());
+        if ($jobIdRange = $request->user()->jobIdRange()) {
+            $jobsQuery->whereBetween('id', $jobIdRange);
+        }
+        $jobs = $jobsQuery->orderByDesc('created_at')->get(['id', 'title', 'department', 'status']);
 
-        $job = $jobId
-            ? $jobQuery->where('id', $jobId)->first()
-            : $jobQuery->latest()->first();
+        $matchesQuery = Matches::with([
+            'candidate:id,user_id,parsed_name,parsed_email,parsed_phone,extracted_skills_json,ai_match_percentage,status',
+            'job:id,title,department,status',
+            'candidate.applications' => fn ($q) => $q->whereHas('job', fn ($j) => $j->accessibleToRecruiter($request->user()))
+        ])
+        ->whereHas('job', fn ($jobs) => $jobs->accessibleToRecruiter($request->user()))
+        ->orderByDesc('match_percentage');
 
-        if (!$job) {
-            return response()->json(['job' => null, 'matches' => [], 'jobs' => []]);
+        if ($jobId && $jobId !== 'all') {
+            $matchesQuery->where('job_id', $jobId);
+            $selectedJob = $jobs->firstWhere('id', (int) $jobId);
+        } else {
+            $selectedJob = null;
         }
 
-        $matches = Matches::with(['candidate', 'job'])
-            ->where('job_id', $job->id)
-            ->orderByDesc('match_percentage')
-            ->get();
-
-        $jobs = Job::where('user_id', $request->user()->id)
-            ->orderByDesc('created_at')
-            ->get(['id', 'title']);
+        $matches = $matchesQuery->get();
 
         return response()->json([
-            'job' => $job,
+            'job' => $selectedJob,
             'jobs' => $jobs,
             'matches' => $matches,
+            'total' => $matches->count(),
         ]);
     }
 
     public function matchesForCandidate(Candidate $candidate, Request $request)
     {
-        if ($candidate->user_id !== $request->user()->id) {
+        if ($candidate->user_id !== $request->user()->id && ! $candidate->applications()
+            ->whereHas('job', fn ($jobs) => $jobs->accessibleToRecruiter($request->user()))
+            ->exists()) {
             return response()->json(['message' => 'Forbidden'], 403);
         }
 
         $matches = Matches::with('job')
             ->where('candidate_id', $candidate->id)
+            ->whereHas('job', fn ($jobs) => $jobs->accessibleToRecruiter($request->user()))
             ->orderByDesc('match_percentage')
             ->get();
 

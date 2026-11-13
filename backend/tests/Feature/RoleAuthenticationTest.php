@@ -2,8 +2,8 @@
 
 namespace Tests\Feature;
 
-use App\Models\User;
 use App\Models\Job;
+use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Hash;
 use Tests\TestCase;
@@ -99,6 +99,7 @@ class RoleAuthenticationTest extends TestCase
             'user_id' => $recruiter->id,
             'title' => 'Open Designer Role',
             'description' => 'An open role.',
+            'department' => 'Software Engineering',
             'required_skills_json' => ['Design'],
             'status' => 'open',
         ]);
@@ -106,6 +107,7 @@ class RoleAuthenticationTest extends TestCase
             'user_id' => $recruiter->id,
             'title' => 'Closed Designer Role',
             'description' => 'A closed role.',
+            'department' => 'Software Engineering',
             'required_skills_json' => [],
             'status' => 'closed',
         ]);
@@ -114,5 +116,74 @@ class RoleAuthenticationTest extends TestCase
             ->assertOk()
             ->assertJsonCount(1, 'data')
             ->assertJsonPath('data.0.title', 'Open Designer Role');
+    }
+
+    public function test_recruiter_can_create_and_filter_jobs_by_department(): void
+    {
+        $recruiter = User::factory()->create(['role' => 'hr']);
+
+        $this->actingAs($recruiter)->postJson('/api/jobs', [
+            'title' => 'Data Analyst',
+            'description' => 'Analyze product and operational data.',
+            'department' => 'Data & Analytics',
+            'employment_type' => 'Full-time',
+            'required_skills' => ['SQL', 'Python'],
+            'experience_requirements' => 'Entry level',
+        ])->assertCreated()
+            ->assertJsonPath('job.department', 'Data & Analytics')
+            ->assertJsonPath('job.employment_type', 'Full-time');
+
+        $this->getJson('/api/public/jobs?department=Data%20%26%20Analytics')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.title', 'Data Analyst');
+    }
+
+    public function test_removed_departments_are_rejected_for_job_creation_and_updates(): void
+    {
+        $recruiter = User::factory()->create(['role' => 'hr']);
+        $baseJob = [
+            'title' => 'Sample Role',
+            'description' => 'A sample role.',
+            'department' => 'Software Engineering',
+            'employment_type' => 'Full-time',
+        ];
+
+        foreach (['Finance', 'Product', 'Customer Success', 'Operations', 'Legal', 'Internships', 'Other'] as $department) {
+            $this->actingAs($recruiter)->postJson('/api/jobs', [
+                ...$baseJob,
+                'department' => $department,
+            ])->assertUnprocessable()
+                ->assertJsonValidationErrors('department');
+        }
+
+        $job = Job::create([
+            'user_id' => $recruiter->id,
+            ...$baseJob,
+            'required_skills_json' => [],
+            'status' => 'open',
+        ]);
+
+        $this->actingAs($recruiter)->putJson("/api/jobs/{$job->id}", [
+            'department' => 'Product',
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors('department');
+    }
+
+    public function test_public_job_board_hides_jobs_with_removed_departments(): void
+    {
+        $recruiter = User::factory()->create(['role' => 'hr']);
+        Job::create([
+            'user_id' => $recruiter->id,
+            'title' => 'Legacy Product Job',
+            'description' => 'A legacy job in a removed department.',
+            'department' => 'Product',
+            'required_skills_json' => [],
+            'status' => 'open',
+        ]);
+
+        $this->getJson('/api/public/jobs')
+            ->assertOk()
+            ->assertJsonCount(0, 'data');
     }
 }

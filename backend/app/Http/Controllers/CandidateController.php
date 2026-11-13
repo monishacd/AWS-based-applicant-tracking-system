@@ -4,18 +4,26 @@ namespace App\Http\Controllers;
 
 use App\Models\Candidate;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
 
 class CandidateController extends Controller
 {
     public function index(Request $request)
     {
+        $jobId = $request->query('job_id');
         $query = Candidate::where(function ($candidates) use ($request) {
             $candidates->where('user_id', $request->user()->id)
-                ->orWhereHas('applications.job', fn ($jobs) => $jobs->where('user_id', $request->user()->id));
-        })->with(['matches.job', 'applications' => fn ($applications) => $applications
-            ->whereHas('job', fn ($jobs) => $jobs->where('user_id', $request->user()->id))
-            ->with('job:id,title')])
+                ->orWhereHas('applications.job', fn ($jobs) => $jobs->accessibleToRecruiter($request->user()));
+        })->with([
+            'matches' => fn ($matches) => $matches
+                ->whereHas('job', fn ($jobs) => $jobs->accessibleToRecruiter($request->user()))
+                ->with('job'),
+            'applications' => fn ($applications) => $applications
+                ->whereHas('job', fn ($jobs) => $jobs->accessibleToRecruiter($request->user()))
+                ->when($jobId, fn ($applications) => $applications->where('job_id', $jobId))
+                ->with('job:id,title,department'),
+        ])
             ->orderByDesc('ai_match_percentage');
 
         if ($search = $request->query('search')) {
@@ -26,19 +34,25 @@ class CandidateController extends Controller
         }
 
         if ($status = $request->query('status')) {
-            if (in_array($status, ['applied', 'shortlisted', 'rejected', 'interview'], true)) {
+            if ($status === 'processing') {
+                $query->where('status', 'parsing');
+            } elseif ($status === 'in_review') {
+                $query->whereHas('applications', fn ($applications) => $applications
+                    ->whereIn('status', ['shortlisted', 'interview'])
+                    ->whereHas('job', fn ($jobs) => $jobs->accessibleToRecruiter($request->user())));
+            } elseif (in_array($status, ['applied', 'shortlisted', 'rejected', 'interview', 'cleared'], true)) {
                 $query->whereHas('applications', fn ($applications) => $applications
                     ->where('status', $status)
-                    ->whereHas('job', fn ($jobs) => $jobs->where('user_id', $request->user()->id)));
+                    ->whereHas('job', fn ($jobs) => $jobs->accessibleToRecruiter($request->user())));
             } else {
                 $query->where('status', $status);
             }
         }
 
-        if ($jobId = $request->query('job_id')) {
+        if ($jobId) {
             $query->whereHas('applications', fn ($applications) => $applications
                 ->where('job_id', $jobId)
-                ->whereHas('job', fn ($jobs) => $jobs->where('user_id', $request->user()->id)));
+                ->whereHas('job', fn ($jobs) => $jobs->accessibleToRecruiter($request->user())));
         }
 
         if ($minScore = $request->query('min_score')) {
@@ -53,12 +67,19 @@ class CandidateController extends Controller
     public function show(Request $request, Candidate $candidate)
     {
         if ($candidate->user_id !== $request->user()->id && !$candidate->applications()
-            ->whereHas('job', fn ($jobs) => $jobs->where('user_id', $request->user()->id))
+            ->whereHas('job', fn ($jobs) => $jobs->accessibleToRecruiter($request->user()))
             ->exists()) {
             return response()->json(['message' => 'Forbidden'], 403);
         }
 
-        $candidate->load(['matches.job']);
+        $candidate->load([
+            'matches' => fn ($matches) => $matches
+                ->whereHas('job', fn ($jobs) => $jobs->accessibleToRecruiter($request->user()))
+                ->with('job'),
+            'applications' => fn ($applications) => $applications
+                ->whereHas('job', fn ($jobs) => $jobs->accessibleToRecruiter($request->user()))
+                ->with('job:id,title,department'),
+        ]);
 
         return response()->json(['candidate' => $candidate]);
     }
@@ -66,7 +87,7 @@ class CandidateController extends Controller
     public function updateNotes(Request $request, Candidate $candidate)
     {
         if ($candidate->user_id !== $request->user()->id && !$candidate->applications()
-            ->whereHas('job', fn ($jobs) => $jobs->where('user_id', $request->user()->id))
+            ->whereHas('job', fn ($jobs) => $jobs->accessibleToRecruiter($request->user()))
             ->exists()) {
             return response()->json(['message' => 'Forbidden'], 403);
         }
@@ -82,5 +103,24 @@ class CandidateController extends Controller
         $candidate->update(['hr_notes' => $request->hr_notes]);
 
         return response()->json(['candidate' => $candidate]);
+    }
+
+    public function destroy(Request $request, Candidate $candidate)
+    {
+        if ($candidate->user_id !== $request->user()->id && !$candidate->applications()
+            ->whereHas('job', fn ($jobs) => $jobs->accessibleToRecruiter($request->user()))
+            ->exists()) {
+            return response()->json(['message' => 'Forbidden'], 403);
+        }
+
+        // Delete the stored resume file if it exists
+        if ($candidate->resume_path && Storage::disk('local')->exists($candidate->resume_path)) {
+            Storage::disk('local')->delete($candidate->resume_path);
+        }
+
+        // Cascade will clean up related matches and applications
+        $candidate->delete();
+
+        return response()->json(['message' => 'Candidate deleted successfully.']);
     }
 }

@@ -4,6 +4,8 @@ namespace App\Http\Controllers;
 
 use App\Models\Application;
 use App\Models\Candidate;
+use App\Notifications\InterviewInvitationNotification;
+use App\Notifications\InterviewUpdateNotification;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
@@ -14,8 +16,9 @@ class ApplicationController extends Controller
     {
         $query = Application::with([
             'candidate:id,user_id,resume_path,status,parsed_name,parsed_email,parsed_phone,extracted_skills_json,parsed_education_json,parsed_experience_json,ai_match_percentage,hr_notes',
-            'job:id,user_id,title,description,required_skills_json,status',
-        ])->whereHas('job', fn ($jobs) => $jobs->where('user_id', $request->user()->id));
+            'user:id,name,email',
+            'job:id,user_id,title,department,employment_type,description,required_skills_json,status',
+        ])->whereHas('job', fn ($jobs) => $jobs->accessibleToRecruiter($request->user()));
 
         if ($jobId = $request->query('job_id')) {
             $query->where('job_id', $jobId);
@@ -29,32 +32,92 @@ class ApplicationController extends Controller
 
     public function update(Request $request, Application $application)
     {
-        abort_unless($application->job()->where('user_id', $request->user()->id)->exists(), 403);
+        abort_unless($application->job()->accessibleToRecruiter($request->user())->exists(), 403);
 
         $validator = Validator::make($request->all(), [
-            'status' => ['sometimes', 'required', 'in:applied,shortlisted,rejected,interview'],
-            'interview_at' => ['nullable', 'date', 'after:now'],
+            'status' => ['sometimes', 'required', 'in:applied,shortlisted,interview,cleared,rejected'],
+            'interview_at' => ['required_if:status,interview', 'nullable', 'date'],
             'interview_notes' => ['nullable', 'string', 'max:3000'],
+            'joining_date' => ['nullable', 'date'],
+            'joining_location' => ['nullable', 'string', 'max:255'],
+            'offer_letter_text' => ['nullable', 'string', 'max:20000'],
         ]);
         if ($validator->fails()) {
             return response()->json(['message' => 'Validation failed', 'errors' => $validator->errors()], 422);
         }
 
-        $application->update($validator->validated());
+        $updates = $validator->validated();
+        if (in_array($updates['status'] ?? null, ['shortlisted', 'interview', 'cleared'], true) && ! $application->shortlisted_at) {
+            $updates['shortlisted_at'] = now();
+        }
+        if (($updates['status'] ?? null) === 'rejected') {
+            $updates['interview_at'] = null;
+            $updates['interview_notes'] = null;
+        }
+        $application->update($updates);
 
-        return response()->json(['application' => $application->fresh()->load(['candidate', 'job'])]);
+        $application = $application->fresh()->load(['candidate', 'job']);
+        $notificationMessage = null;
+        if (($updates['status'] ?? null) === 'interview') {
+            $interview = $application->interviews()
+                ->whereIn('status', ['scheduled', 'rescheduled'])
+                ->latest('scheduled_at')
+                ->first();
+            $rescheduled = $interview && ! $interview->scheduled_at->equalTo($application->interview_at);
+            if ($interview) {
+                $interview->update([
+                    'scheduled_at' => $application->interview_at,
+                    'instructions' => $application->interview_notes,
+                    'status' => $rescheduled ? 'rescheduled' : $interview->status,
+                ]);
+            } else {
+                $interview = $application->interviews()->create([
+                    'scheduled_at' => $application->interview_at,
+                    'instructions' => $application->interview_notes,
+                    'status' => 'scheduled',
+                ]);
+            }
+            $interview->load(['application.job.user', 'application.user']);
+            $application->user->notify(new InterviewUpdateNotification($interview, $rescheduled ? 'rescheduled' : 'scheduled'));
+            $application->user->notify(new InterviewInvitationNotification(
+                $application->job,
+                $request->user(),
+                $application->interview_at->toFormattedDateString().' at '.$application->interview_at->format('g:i A T'),
+                $application->interview_notes,
+            ));
+            $notificationMessage = match (config('mail.default')) {
+                'log' => 'Email notification was written to the Laravel log; configure SMTP to deliver it to the candidate.',
+                'array' => 'Invitation email was not delivered because the array mailer does not send emails.',
+                default => 'Invitation email handed to the configured mail transport.',
+            };
+        }
+        if (($updates['status'] ?? null) === 'rejected') {
+            $cancelledInterviews = $application->interviews()
+                ->whereIn('status', ['scheduled', 'rescheduled'])
+                ->get();
+            foreach ($cancelledInterviews as $interview) {
+                $interview->update(['status' => 'cancelled']);
+                $interview->load(['application.job.user', 'application.user']);
+                $application->user->notify(new InterviewUpdateNotification($interview, 'cancelled'));
+            }
+        }
+
+        return response()->json([
+            'application' => $application,
+            'message' => $notificationMessage,
+        ]);
     }
 
     public function downloadResume(Request $request, Candidate $candidate)
     {
         $authorized = $candidate->applications()
-            ->whereHas('job', fn ($jobs) => $jobs->where('user_id', $request->user()->id))
+            ->whereHas('job', fn ($jobs) => $jobs->accessibleToRecruiter($request->user()))
             ->exists();
         abort_unless($authorized || $candidate->user_id === $request->user()->id, 403);
 
         return Storage::disk('local')->download(
             $candidate->resume_path,
-            'resume-' . $candidate->id . '.' . pathinfo($candidate->resume_path, PATHINFO_EXTENSION),
+            'resume-'.$candidate->id.'.'.pathinfo($candidate->resume_path, PATHINFO_EXTENSION),
         );
     }
 }

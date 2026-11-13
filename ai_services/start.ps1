@@ -11,5 +11,6 @@ Write-Host "Installing dependencies (first run may take a few minutes)..."
 .\venv\Scripts\pip.exe install -q -r requirements.txt
 
 $env:PORT = "5001"
+$env:HOST = "127.0.0.1"
 Write-Host "Starting AI service on http://127.0.0.1:5001"
 .\venv\Scripts\python.exe app.py

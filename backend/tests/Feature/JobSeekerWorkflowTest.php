@@ -5,8 +5,12 @@ namespace Tests\Feature;
 use App\Models\Application;
 use App\Models\Candidate;
 use App\Models\Job;
+use App\Models\Matches;
 use App\Models\User;
+use App\Notifications\InterviewInvitationNotification;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
@@ -35,6 +39,7 @@ class JobSeekerWorkflowTest extends TestCase
 
     public function test_job_seeker_can_apply_and_recruiter_can_update_application_and_schedule_interview(): void
     {
+        Notification::fake();
         $seeker = User::factory()->create(['role' => 'job_seeker']);
         $recruiter = User::factory()->create(['role' => 'hr']);
         $job = $this->createJob(['React', 'PHP'], $recruiter);
@@ -60,7 +65,18 @@ class JobSeekerWorkflowTest extends TestCase
             'status' => 'interview',
             'interview_at' => $scheduledAt->toIso8601String(),
             'interview_notes' => 'Video call link will be shared by email.',
-        ])->assertOk()->assertJsonPath('application.status', 'interview');
+        ])->assertOk()
+            ->assertJsonPath('application.status', 'interview')
+            ->assertJsonPath(
+                'message',
+                match (config('mail.default')) {
+                    'log' => 'Email notification was written to the Laravel log; configure SMTP to deliver it to the candidate.',
+                    'array' => 'Invitation email was not delivered because the array mailer does not send emails.',
+                    default => 'Invitation email handed to the configured mail transport.',
+                }
+            );
+
+        Notification::assertSentTo($seeker, InterviewInvitationNotification::class);
 
         $this->actingAs($seeker)->getJson('/api/user/applications')
             ->assertOk()
@@ -97,6 +113,69 @@ class JobSeekerWorkflowTest extends TestCase
             ->assertDownload("resume-{$candidate->id}.pdf");
         $this->actingAs($otherRecruiter)->getJson("/api/candidates/{$candidate->id}/resume")
             ->assertForbidden();
+    }
+
+    public function test_recruiter_can_manually_approve_a_low_match_candidate(): void
+    {
+        $seeker = User::factory()->create(['role' => 'job_seeker']);
+        $recruiter = User::factory()->create(['role' => 'hr']);
+        $job = $this->createJob(['React'], $recruiter);
+        $candidate = Candidate::create([
+            'user_id' => $seeker->id,
+            'resume_path' => 'resumes/low-match.pdf',
+            'status' => 'done',
+            'ai_match_percentage' => 30,
+        ]);
+        $application = Application::create([
+            'user_id' => $seeker->id,
+            'candidate_id' => $candidate->id,
+            'job_id' => $job->id,
+            'status' => 'applied',
+        ]);
+        Matches::create([
+            'candidate_id' => $candidate->id,
+            'job_id' => $job->id,
+            'match_percentage' => 30,
+        ]);
+
+        $this->actingAs($recruiter)->patchJson("/api/applications/{$application->id}", [
+            'status' => 'shortlisted',
+        ])->assertOk()->assertJsonPath('application.status', 'shortlisted');
+
+        $this->actingAs($seeker)->getJson('/api/user/applications')
+            ->assertOk()
+            ->assertJsonPath('applications.0.status', 'shortlisted');
+
+        $scheduledAt = now()->addDays(3)->startOfHour();
+        $this->actingAs($recruiter)->patchJson("/api/applications/{$application->id}", [
+            'status' => 'interview',
+            'interview_at' => $scheduledAt->toIso8601String(),
+            'interview_notes' => 'Interview invitation and meeting details.',
+        ])->assertOk()->assertJsonPath('application.status', 'interview');
+
+        $this->actingAs($seeker)->getJson('/api/user/applications')
+            ->assertOk()
+            ->assertJsonPath('applications.0.status', 'interview')
+            ->assertJsonPath('applications.0.interview_notes', 'Interview invitation and meeting details.');
+
+        $this->actingAs($recruiter)->patchJson("/api/applications/{$application->id}", [
+            'status' => 'rejected',
+        ])->assertOk()->assertJsonPath('application.status', 'rejected');
+
+        $this->actingAs($seeker)->getJson('/api/user/applications')
+            ->assertOk()
+            ->assertJsonPath('applications.0.status', 'rejected')
+            ->assertJsonPath('applications.0.interview_at', null);
+    }
+
+    public function test_resume_upload_rejects_pdf_mime_with_a_non_pdf_extension(): void
+    {
+        Storage::fake('local');
+        $recruiter = User::factory()->create(['role' => 'hr']);
+
+        $this->actingAs($recruiter)->post('/api/upload-resume', [
+            'resume' => UploadedFile::fake()->create('resume.txt', 10, 'application/pdf'),
+        ])->assertUnprocessable();
     }
 
     private function createJob(array $skills, ?User $recruiter = null): Job

@@ -254,4 +254,8 @@ def parse_and_match():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5001))
     print(f"Resume AI service listening on http://127.0.0.1:{port}")
-    app.run(host="0.0.0.0", port=port, debug=os.environ.get("FLASK_DEBUG", "0") == "1")
+    app.run(
+        host=os.environ.get("HOST", "0.0.0.0"),
+        port=port,
+        debug=os.environ.get("FLASK_DEBUG", "0") == "1",
+    )
