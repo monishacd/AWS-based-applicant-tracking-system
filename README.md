@@ -206,15 +206,15 @@ This deployment keeps the app on one Amazon EC2 instance, the MySQL database on 
 ### AWS Deployment Architecture
 
 ```mermaid
-flowchart LR
-    Browser[Browser] -->|HTTPS| Nginx[Nginx on EC2 - Amazon Linux 2023]
-    Nginx -->|static files| React[React + Vite build]
-    Nginx -->|/api via FastCGI| Laravel[Laravel 12 + PHP-FPM]
-    Laravel -->|MySQL 3306 in private VPC| RDS[(Amazon RDS MySQL)]
-    Laravel -->|HTTP 127.0.0.1:5001| Flask[Private Flask resume service]
-    Laravel -->|private local disk| EBS[EC2 EBS volume - resume files]
-    Backup[EC2 backup script + IAM role] -->|mysqldump over TLS| RDS
-    Backup -->|S3 API| S3[(Private S3 backup bucket)]
+graph LR
+    Browser[Browser] --> Nginx[Nginx on EC2 with Amazon Linux 2023]
+    Nginx --> React[React Vite build]
+    Nginx --> Laravel[Laravel 12 with PHP FPM]
+    Laravel --> RDS[Private Amazon RDS MySQL]
+    Laravel --> Flask[Private Flask resume service]
+    Laravel --> EBS[EC2 EBS resume storage]
+    Backup[EC2 backup script with IAM role] --> RDS
+    Backup --> S3[Private S3 backup bucket]
 ```
 
 ### AWS Free Tier and Cost Checks
@@ -589,15 +589,15 @@ Test restores periodically in a separate database. A backup that has never been 
 ## 🏗️ System Architecture and Application Flow
 
 ```mermaid
-flowchart LR
-    U[Recruiter or job seeker browser] -->|local: Vite / production: Nginx| FE[React 18 client]
-    FE -->|JSON API + Sanctum token| API[Laravel 12 API]
-    API --> DB[(MySQL: users, jobs, resumes metadata, applications, matches, interviews)]
-    API -->|local HTTP, optional parsing flow| AI[Flask resume service]
-    API -->|PDF/DOCX text extraction and fallback matching| PHP[Laravel services]
-    API -->|private local storage| FILES[EC2 EBS or local disk: resume files]
-    BACKUP[EC2 scheduled database dump] -->|EC2 IAM role| S3[(Private S3 backup bucket)]
-    BACKUP --> DB
+graph LR
+    U[Recruiter or job seeker browser] --> FE[React client served by Vite or Nginx]
+    FE --> API[Laravel 12 API with Sanctum]
+    API --> DB[MySQL application data]
+    API --> AI[Optional Flask resume service]
+    API --> PHP[PHP resume parser and matcher]
+    API --> FILES[Private local resume storage]
+    DB --> BACKUP[EC2 scheduled database dump using IAM role]
+    BACKUP --> S3[Private S3 backup bucket]
 ```
 
 In development, Vite serves the frontend on port 5173, Laravel serves the API on port 8000, and the optional Flask service listens on port 5001. In the AWS guide, Nginx serves the built React app and passes `/api` requests to PHP-FPM; Flask listens only on `127.0.0.1:5001`. RDS and S3 are not exposed as public application endpoints.
@@ -605,24 +605,24 @@ In development, Vite serves the frontend on port 5173, Laravel serves the API on
 ### Application Flow
 
 ```mermaid
-flowchart TD
+graph TD
     Browser[Recruiter or job seeker] --> Client[React web client]
-    Client --> Auth[Laravel API: authenticate and authorize role]
-    Auth --> Role{User role}
-    Role -->|Recruiter| JobSetup[Create and manage job postings]
-    JobSetup --> Jobs[(MySQL jobs)]
-    Role -->|Job seeker| Resume[Upload resume or use saved profile]
-    Resume --> Store[Save resume on private local disk]
+    Client --> Auth[Laravel API authenticates and authorizes user]
+    Auth --> Role[Role based workflows]
+    Role --> JobSetup[Recruiter creates job postings]
+    JobSetup --> Jobs[MySQL jobs]
+    Role --> Resume[Job seeker uploads resume or uses profile]
+    Resume --> Store[Private local resume storage]
     Store --> Parse[Extract resume text and skills]
-    Parse --> Profile[(MySQL candidate profile)]
+    Parse --> Profile[MySQL candidate profile]
     Jobs --> Discovery[Browse open jobs]
     Profile --> Discovery
     Discovery --> Apply[Apply to a job]
-    Apply --> Match[Compare resume/profile skills with job requirements]
-    Match --> Records[(MySQL application and match records)]
-    Records --> Review[Recruiter reviews candidate and updates status]
+    Apply --> Match[Compare skills with job requirements]
+    Match --> Records[MySQL application and match records]
+    Records --> Review[Recruiter reviews and updates status]
     Review --> Interview[Schedule interview or publish outcome]
-    Interview --> Notify[In-app notification and candidate update]
+    Interview --> Notify[In app notification and candidate update]
 ```
 
 For recruiter-led resume screening, Laravel can also call the optional Flask service; if it is unavailable, the PHP matcher provides a fallback. That screening path records candidate and job-match data for recruiter review.
@@ -672,18 +672,17 @@ match percentage = matched required skill terms / total required skill terms * 1
 The scoring workflow is:
 
 ```mermaid
-flowchart TD
+graph TD
     Resume[Resume file] --> Text[Extract readable text and recognized skills]
-    Job[Job title, description, and required skills] --> HasSkills{Explicit required skills?}
-    HasSkills -->|Yes| Required[Use the listed required skills]
-    HasSkills -->|No| Infer[Infer recognized skills from title and description]
-    Text --> Compare[Case-insensitive, word-boundary skill comparison]
+    Job[Job title and description] --> Required[Use explicit skills or infer known skills]
+    Text --> Compare[Case insensitive word boundary skill comparison]
     Required --> Compare
-    Infer --> Compare
     Compare --> Explain[Collect matched and missing skills]
-    Explain --> AnyRequired{Any skills to compare?}
-    AnyRequired -->|Yes| Score[Round matched skills / required skills x 100]
-    AnyRequired -->|No| NoScore[Return 0 and explain no score is available]
+    Explain --> Check[Check whether required skills exist]
+    Check --> Yes[Yes]
+    Check --> No[No]
+    Yes --> Score[Round matched skills divided by required skills times 100]
+    No --> NoScore[Return zero and explain no score is available]
     Score --> Result[Persist match details for recommendations or recruiter review]
     NoScore --> Result
 ```
