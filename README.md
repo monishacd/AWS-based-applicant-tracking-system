@@ -10,26 +10,32 @@
 
 **HireFlow** is a modern, role-separated recruitment platform and Applicant Tracking System (ATS). It connects hiring teams and candidates through dedicated workspaces: **Recruiters** manage job postings, parse candidate resumes, and track applicants with automated screening scores, while **Job Seekers** discover openings with interactive analytics, upload resumes for skill extraction, and track applications through interview and offer stages.
 
+## Project Details and Technology Stack
+
+| Area | Technology | Responsibility |
+|---|---|---|
+| Web client | React 18, React Router 7, Vite 6, Lucide React | Recruiter and job-seeker dashboards, job discovery, forms, and application tracking |
+| REST API | PHP 8.2+, Laravel 12, Laravel Sanctum | Authentication, role authorization, job/application workflows, interviews, and notifications |
+| Database | MySQL 8 / MariaDB; SQLite is configured for local automated tests | Users, jobs, extracted resume data, applications, matches, interviews, and notifications |
+| Resume and matching service | Python 3, Flask, pypdf, python-docx | Optional HTTP resume parsing, contact/skill extraction, and explicit skill-overlap scoring |
+| Built-in fallback | PHP `LocalAiMatcher` | Local skill extraction and matching when the Python service is unavailable |
+| File storage | Laravel private local disk by default | Uploaded resume files; deployed files reside on the EC2 instance's private EBS volume |
+| AWS deployment | Amazon Linux 2023, EC2, RDS for MySQL, S3, Nginx, PHP-FPM, systemd | Hosts the app, stores relational data, and can store database backup files |
+
+> **Storage note:** The resume controllers explicitly use Laravel's `local` disk. Setting `FILESYSTEM_DISK=s3` alone does not move resume uploads to S3. The deployment guide below uses S3 for database backups and keeps resumes private on EC2; S3 resume storage requires a code change.
+
+HireFlow is an ATS workflow application, not an email-delivery service or an automated hiring decision system. Interview updates are stored as in-app notifications. Match percentages are heuristic skill-overlap indicators and should support, not replace, human review.
+
 ---
 
 ## 📑 Table of Contents
 
-1. [⚡ Quickstart: Local Setup Guide](#-quickstart-local-setup-guide)
-2. [📸 Application Preview & Screenshots](#-application-preview--screenshots)
-3. [☁️ Complete AWS Production Deployment Guide (Beginner Friendly)](#️-complete-aws-production-deployment-guide-beginner-friendly)
-   - [AWS Architecture Overview](#1-aws-cloud-architecture-overview)
-   - [Phase 1: IAM User & Security Credentials](#phase-1-iam-user--security-credentials)
-   - [Phase 2: Amazon S3 Buckets Setup (Resumes & Backups)](#phase-2-create-amazon-s3-buckets)
-   - [Phase 3: Amazon RDS (MySQL Database) Setup](#phase-3-create-and-configure-amazon-rds-mysql)
-   - [Phase 4: Launch and Configure Amazon EC2 Instance](#phase-4-launch-and-configure-amazon-ec2-instance)
-   - [Phase 5: Server Environment Installation on EC2](#phase-5-install-server-environment-on-ec2)
-   - [Phase 6: Deploy HireFlow Application to EC2](#phase-6-deploy-hireflow-code-to-ec2)
-   - [Phase 7: Store Uploaded Files in Amazon S3](#phase-7-store-uploaded-files-in-amazon-s3)
-   - [Phase 8: Automated RDS Database Backups to Amazon S3](#phase-8-automated-rds-database-backups-to-amazon-s3)
-   - [Phase 9: Free SSL Certificate (HTTPS) with Certbot](#phase-9-free-ssl-certificate-https-with-certbot)
-4. [🏗️ System Architecture](#️-system-architecture)
+1. [Project Details and Technology Stack](#project-details-and-technology-stack)
+2. [⚡ Quickstart: Local Setup Guide](#-quickstart-local-setup-guide)
+3. [☁️ AWS Console Deployment: Amazon Linux 2023, EC2, RDS, and S3](#️-aws-console-deployment-amazon-linux-2023-ec2-rds-and-s3)
+4. [🏗️ System Architecture and Application Flow](#️-system-architecture-and-application-flow)
 5. [🚀 Key Features](#-key-features)
-6. [🤖 Explainable AI Matching Algorithm](#-explainable-ai-matching-algorithm)
+6. [🤖 Explainable Skill-Overlap Matching](#-explainable-skill-overlap-matching)
 7. [🔌 API Endpoints Reference](#-api-endpoints-reference)
 8. [📂 Project Directory Structure](#-project-directory-structure)
 9. [🛠️ Troubleshooting & FAQs](#️-troubleshooting--faqs)
@@ -65,7 +71,7 @@ Ensure you have the following installed before starting:
 
 ### Step 2: Backend Setup (Laravel 12 API)
 
-Open a **PowerShell** or terminal window in the project root (`c:\xampp\htdocs\Applicant tracking`):
+Open a **PowerShell** or terminal window in the project root (for example, `C:\xampp\htdocs\AWS-based-applicant-tracking-system`):
 
 ```powershell
 # 1. Navigate to the backend directory
@@ -191,749 +197,444 @@ To quickly test the application with realistic data:
 
 ---
 
-## 📸 Application Preview & Screenshots
+## ☁️ AWS Console Deployment: Amazon Linux 2023, EC2, RDS, and S3
 
-### 1. Landing Page & Dual Portal Navigation
-The public landing page provides clear entry points for hiring teams and candidates with backend-enforced role routing.
+This deployment keeps the app on one Amazon EC2 instance, the MySQL database on private Amazon RDS, and database export files in a private S3 bucket. The EC2 instance runs the React build, Nginx, Laravel/PHP-FPM, and the Flask service. Use one AWS Region for all resources.
 
-![HireFlow Landing Page](screenshots/01-landing-page.svg)
+> **Important application behavior:** Resume upload and download code explicitly uses Laravel's private local disk. It stores files on the EC2 EBS volume; setting `FILESYSTEM_DISK=s3` does not switch these controllers to S3. In this guide, S3 is for database backup files only. Do not delete the EC2 volume while it contains the only copy of resumes.
 
----
+### AWS Deployment Architecture
 
-### 2. Recruiter Workspace & Dashboard Analytics
-Recruiters gain immediate visibility into recruitment metrics, active job postings, candidate pipelines, and AI screening scores.
-
-![Recruiter Dashboard](screenshots/02-recruiter-dashboard.svg)
-
----
-
-### 3. Job Seeker Discovery Board & Department Analytics
-Candidates can filter open positions, view department posting breakdowns, explore salary ranges, and submit applications.
-
-![Job Seeker Board](screenshots/03-jobseeker-dashboard.svg)
-
----
-
-### 4. AI Resume Screening & Explainable Match Analysis
-Inspect candidate match scores with transparent breakdown of matched requirements versus missing skills to develop.
-
-![AI Resume Screening](screenshots/04-ai-matching-analysis.svg)
-
----
-
-## ☁️ Complete AWS Production Deployment Guide (Beginner Friendly)
-
-This comprehensive guide is designed for beginners. It walks you through deploying HireFlow to Amazon Web Services (AWS) using:
-- **Amazon EC2:** Virtual cloud server running Ubuntu Linux to host the React Frontend, Laravel Backend API, and Python Flask AI service.
-- **Amazon RDS (MySQL):** Managed relational database service with automatic failover, high availability, and backups.
-- **Amazon S3 (Simple Storage Service):** Cloud object storage for:
-  1. Storing candidate uploaded resumes securely.
-  2. Storing automated daily database backups for disaster recovery.
-
----
-
-### 1. AWS Cloud Architecture Overview
-
-```text
-                                 [ Users / Browser ]
-                                          |
-                                          | HTTPS (Port 443 / 80)
-                                          v
-+----------------------------------------------------------------------------------+
-|                            AWS VPC (Virtual Cloud)                               |
-|                                                                                  |
-|  +----------------------------------------------------------------------------+  |
-|  |                       Amazon EC2 Instance (Ubuntu 24.04 LTS)               |  |
-|  |                                                                            |  |
-|  |   +--------------------------------------------------------------------+   |  |
-|  |   |                     Nginx Reverse Proxy Server                     |   |  |
-|  |   |   - Serves React Frontend (Static Dist Files)                      |   |  |
-|  |   |   - Routes /api requests to PHP 8.3-FPM (Laravel 12)               |   |  |
-|  |   |   - Proxies AI parser requests to Python Flask (Port 5001)         |   |  |
-|  |   +--------------------------------------------------------------------+   |  |
-|  |                 |                                    |                     |  |
-|  |                 | PHP-FPM                            | Systemd Service     |  |
-|  |                 v                                    v                     |  |
-|  |     [ Laravel 12 Backend API ]             [ Python Flask AI Service ]     |  |
-|  |                 |                                                          |  |
-|  |                 | DB Connection (Port 3306)                                |  |
-|  +-----------------+----------------------------------------------------------+  |
-|                    |                                                             |
-|                    v                                                             |
-|  +-------------------------------------+      +-------------------------------+  |
-|  |     Amazon RDS (MySQL 8.0)          |      |       Amazon S3 Buckets       |  |
-|  |  - Managed Database: resume_ats     |      |  1. hireflow-resumes-storage  |  |
-|  |  - Internal Security Group Only     |      |  2. hireflow-database-backups |  |
-|  +-------------------------------------+      +-------------------------------+  |
-|                    |                                          ^                  |
-|                    +--- Automated Daily mysqldump Backup -----+                  |
-+----------------------------------------------------------------------------------+
+```mermaid
+flowchart LR
+    Browser[Browser] -->|HTTPS| Nginx[Nginx on EC2 - Amazon Linux 2023]
+    Nginx -->|static files| React[React + Vite build]
+    Nginx -->|/api via FastCGI| Laravel[Laravel 12 + PHP-FPM]
+    Laravel -->|MySQL 3306 in private VPC| RDS[(Amazon RDS MySQL)]
+    Laravel -->|HTTP 127.0.0.1:5001| Flask[Private Flask resume service]
+    Laravel -->|private local disk| EBS[EC2 EBS volume - resume files]
+    Backup[EC2 backup script + IAM role] -->|mysqldump over TLS| RDS
+    Backup -->|S3 API| S3[(Private S3 backup bucket)]
 ```
 
----
+### AWS Free Tier and Cost Checks
 
-### Phase 1: IAM User & Security Credentials
+AWS offers different plans and Free Tier terms depending on account age and eligibility. AWS currently advertises up to **$200 in credits over up to six months** for eligible new customers; this is not a permanent free hosting plan. Review the current [AWS Free Tier terms](https://aws.amazon.com/free/), [Free Tier FAQs](https://aws.amazon.com/free/free-tier-faqs/), and [RDS offer details](https://aws.amazon.com/rds/free/) before creating resources. Older accounts may be governed by legacy offers.
 
-An IAM User with programmatic access keys gives your EC2 server permission to upload resumes and database backups to Amazon S3.
+Before launching:
 
-1. Log in to the [AWS Management Console](https://console.aws.amazon.com/).
-2. In the top search bar, type **IAM** and click on the **IAM** service.
-3. In the left navigation menu, click **Users** &rarr; click **Create user**.
-4. Set the user details:
-   - **User name:** `hireflow-app-user`
-   - Leave "Provide user access to the AWS Management Console" **unchecked** (programmatic access only).
-   - Click **Next**.
-5. Set permissions:
-   - Select **Attach policies directly**.
-   - In the search bar, search for `AmazonS3FullAccess`.
-   - Check the box next to **`AmazonS3FullAccess`**.
-   - Click **Next** &rarr; click **Create user**.
-6. Create Access Keys:
-   - Click on the newly created user `hireflow-app-user`.
-   - Go to the **Security credentials** tab.
-   - Scroll down to the **Access keys** section and click **Create access key**.
-   - Select **Application running on an AWS compute service** &rarr; check the confirmation box &rarr; click **Next**.
-   - (Optional) Add a description like `HireFlow EC2 S3 access`.
-   - Click **Create access key**.
-7. ⚠️ **IMPORTANT:** Copy your **Access Key ID** and **Secret Access Key** immediately and save them securely (or click **Download .csv file**). You will not be able to view the secret key again.
+1. In the AWS Console, select a single Region and open **Billing and Cost Management**.
+2. Create a budget and billing alerts. Alerts notify you; they do not stop resources or guarantee a zero bill.
+3. Use only instance/database choices that the console marks eligible for your account and Region. Do not assume a size is free because an older tutorial lists it.
+4. Check EBS volumes, public IPv4 addresses, RDS storage/backups, data transfer, and S3 storage/requests; these can consume credits or incur charges.
+5. This is a learning deployment, not a highly available production design. Protect real resumes with HTTPS, private database networking, least privilege, backups, and access controls.
 
----
+### Step 1: Create a Private S3 Backup Bucket
 
-### Phase 2: Create Amazon S3 Buckets
+1. In the AWS Console, choose **S3** → **Create bucket**.
+2. Choose a globally unique name, for example `hireflow-db-backups-<unique-suffix>`, and select the same Region you will use for EC2 and RDS.
+3. Keep **Block all public access** enabled and leave ACLs disabled.
+4. Keep default server-side encryption enabled (SSE-S3 is sufficient for this example).
+5. Create the bucket. Backup objects will be stored under the `database/` prefix.
+6. Optionally add an S3 lifecycle rule to expire old database dumps after a retention period you choose. Check storage and request costs before enabling versioning or replication.
 
-You will create two separate S3 buckets:
-1. `hireflow-resumes-storage-<your-unique-suffix>`: for candidate resumes.
-2. `hireflow-database-backups-<your-unique-suffix>`: for MySQL database backup dumps.
+Do not make the bucket public. The application does not currently store resume uploads in this bucket.
 
-> *Note: S3 bucket names are globally unique across all AWS accounts worldwide. Replace `<your-unique-suffix>` with your name or random numbers (e.g., `hireflow-resumes-storage-john99`).*
+### Step 2: Create an EC2 IAM Role for S3 Backups
 
-#### Create Bucket 1 (Resumes):
-1. In the AWS search bar, type **S3** and select **S3**.
-2. Click **Create bucket**.
-3. **Bucket name:** `hireflow-resumes-storage-<your-unique-suffix>`
-4. **AWS Region:** Choose the region closest to you (e.g., `us-east-1` (N. Virginia) or `ap-south-1` (Mumbai)). *Keep all your AWS resources in the same region!*
-5. Under **Block Public Access settings for this bucket**:
-   - Keep **Block all public access** checked. Resumes contain sensitive candidate data and will be securely downloaded through authorized backend API routes.
-6. Under **Default encryption**:
-   - Select **Server-side encryption with Amazon S3 managed keys (SSE-S3)**.
-7. Click **Create bucket**.
+Do not create long-lived IAM access keys or run `aws configure` on the instance. Use an EC2 instance role so AWS supplies temporary credentials.
 
-#### Create Bucket 2 (Database Backups):
-1. Click **Create bucket** again.
-2. **Bucket name:** `hireflow-database-backups-<your-unique-suffix>`
-3. **AWS Region:** Same region as above.
-4. Keep **Block all public access** checked.
-5. Click **Create bucket**.
+1. In **IAM** → **Policies** → **Create policy** → **JSON**, create a policy for the one bucket. Replace the bucket name:
 
----
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       {
+         "Effect": "Allow",
+         "Action": ["s3:GetBucketLocation", "s3:ListBucket"],
+         "Resource": "arn:aws:s3:::hireflow-db-backups-<unique-suffix>",
+         "Condition": {
+           "StringLike": {
+             "s3:prefix": ["database/*"]
+           }
+         }
+       },
+       {
+         "Effect": "Allow",
+         "Action": ["s3:GetObject", "s3:PutObject"],
+         "Resource": "arn:aws:s3:::hireflow-db-backups-<unique-suffix>/database/*"
+       }
+     ]
+   }
+   ```
 
-### Phase 3: Create and Configure Amazon RDS (MySQL)
+2. Name the policy `HireFlowDatabaseBackup`.
+3. In **IAM** → **Roles** → **Create role**, choose **AWS service** → **EC2** as the trusted entity.
+4. Attach `HireFlowDatabaseBackup`, name the role `HireFlowEC2Role`, and create it.
+5. Attach this role to the EC2 instance during launch (or afterward using **Actions** → **Security** → **Modify IAM role**).
 
-Amazon RDS manages your MySQL server in the cloud with zero maintenance.
+The role is limited to listing, uploading, and restoring backup objects in this bucket. It does not grant S3-wide access.
 
-#### 1. Create RDS Database Instance
-1. In the AWS search bar, type **RDS** and select **RDS**.
-2. In the RDS dashboard, click **Create database**.
-3. Select configuration options:
-   - **Choose a database creation method:** Standard create
-   - **Engine type:** MySQL
-   - **Engine Version:** MySQL 8.0 (select latest 8.0.x)
-   - **Templates:** Choose **Free tier** (gives 750 free hours/month).
-4. **Settings:**
-   - **DB instance identifier:** `hireflow-db`
-   - **Master username:** `admin`
-   - **Master password:** Set a strong password (e.g., `HireFlowSecurePass2026!`). Record this password!
-5. **Instance configuration:**
-   - **DB instance class:** Burstable classes &rarr; `db.t3.micro` or `db.t4g.micro` (Free tier eligible).
-6. **Storage:**
-   - **Storage type:** General Purpose SSD (gp2 or gp3)
-   - **Allocated storage:** `20` GiB
-   - **Enable storage autoscaling:** Uncheck (to prevent unexpected costs).
-7. **Connectivity:**
-   - **Virtual private cloud (VPC):** Default VPC
-   - **Public access:** Select **Yes** (temporary for initial testing, or **No** if you only access it from inside the VPC EC2 instance).
-   - **VPC security group:** Select **Create new**:
-     - **New VPC security group name:** `hireflow-rds-sg`
-8. **Additional configuration:**
-   - Click to expand **Additional configuration**.
-   - **Initial database name:** `resume_ats` (⚠️ Do not skip this; this creates the database).
-   - **Backup retention period:** `7 days` (enables automated daily snapshots).
-9. Click **Create database** at the bottom.
-10. Database creation takes **5-10 minutes**. When the status changes to **Available**, click on `hireflow-db`.
-11. Under **Connectivity & security**, copy the **Endpoint** URL (e.g. `hireflow-db.c3xxxxxx.us-east-1.rds.amazonaws.com`). This is your `DB_HOST`.
+### Step 3: Create a Security Group and Launch Amazon Linux 2023 on EC2
 
-#### 2. Allow EC2 to Connect to RDS Security Group
-1. On the RDS details page, under **Connectivity & security**, click on the link under **VPC security groups** (`hireflow-rds-sg`).
-2. Select the security group &rarr; click the **Inbound rules** tab &rarr; click **Edit inbound rules**.
-3. Click **Add rule**:
-   - **Type:** `MySQL/Aurora` (Port `3306`)
-   - **Source:** Select **Anywhere-IPv4** (`0.0.0.0/0`) during initial setup, or better, select your EC2 Security Group ID once EC2 is created.
-4. Click **Save rules**.
+1. In **EC2** → **Security Groups**, create `hireflow-web-sg` in the default VPC (or your chosen VPC).
+2. Add inbound rules:
+   - SSH, TCP 22, **My IP** only.
+   - HTTP, TCP 80, `0.0.0.0/0` (and `::/0` if using IPv6).
+   - HTTPS, TCP 443, `0.0.0.0/0` (and `::/0` if using IPv6).
+   - Do **not** add public rules for MySQL 3306 or Flask 5001.
+3. In **EC2** → **Launch instance**, choose:
+   - Name: `hireflow-web`.
+   - **Application and OS image (AMI): Amazon Linux 2023 AMI**, 64-bit x86. Do not choose Ubuntu or Amazon Linux 2 for these steps.
+   - An instance type explicitly marked eligible for your account/Region. For a small learning instance, start with the smallest eligible size; building the frontend and parsing large PDFs may exceed its memory.
+   - A key pair you create and download. Keep the private key only on your computer.
+   - Network: the VPC used for RDS, a public subnet, and a public IPv4 address so users can reach Nginx.
+   - Security group: `hireflow-web-sg`.
+   - Advanced details → IAM instance profile: `HireFlowEC2Role`. Require IMDSv2 if the option is available.
+   - Keep the root EBS volume small; review its estimated cost and free allowance.
+4. Launch the instance and wait for **Running** and passing status checks.
 
----
+### Step 4: Create a Private Amazon RDS for MySQL Database
 
-### Phase 4: Launch and Configure Amazon EC2 Instance
+1. In **RDS** → **Databases** → **Create database**, select **Standard create**, **MySQL**, and a supported MySQL 8.x version.
+2. Select the Free Tier/Free Plan template if offered. Choose only a DB instance class that the console marks eligible for your account and Region.
+3. Set the DB identifier (for example `hireflow-db`), a strong master password, and initial database name `resume_ats`. Store the master credentials in a password manager; do not use the master user in the app.
+4. Under **Connectivity**, select the VPC containing EC2, set **Public access** to **No**, and choose **Connect to an EC2 compute resource** if the console offers it. Select `hireflow-web`.
+5. If configuring networking manually, create `hireflow-db-sg` and allow inbound MySQL/TCP 3306 **from `hireflow-web-sg` only**. Never use `0.0.0.0/0` as the database rule.
+6. For a learning deployment, use a single-AZ option if eligible, keep storage autoscaling off or tightly limited, and choose a backup retention setting you understand. Multi-AZ increases availability but can increase cost.
+7. Create the database and wait for **Available**. Copy its endpoint from **Connectivity & security**; do not add `https://` or a port to `DB_HOST`.
+8. From the EC2 shell, create a separate least-privilege database user for the app:
 
-Now launch an Ubuntu virtual machine on EC2 to host the web application.
+   ```bash
+   mysql -h YOUR_RDS_ENDPOINT -u YOUR_MASTER_USER -p
+   ```
 
-#### 1. Launch EC2 Instance
-1. In the AWS search bar, type **EC2** and select **EC2**.
-2. Click **Launch instance**.
-3. **Name:** `hireflow-production-server`
-4. **Application and OS Images:**
-   - Select **Ubuntu** &rarr; **Ubuntu Server 24.04 LTS (HVM), SSD Volume Type** (Free tier eligible).
-5. **Instance type:**
-   - Select `t2.micro` or `t3.micro` (1 vCPU, 1 GiB Memory, Free tier eligible).
-6. **Key pair (login):**
-   - Click **Create new key pair**.
-   - **Key pair name:** `hireflow-key`
-   - **Key pair type:** `RSA`
-   - **Private key file format:** `.pem` (for OpenSSH / PowerShell / Mac / Linux).
-   - Click **Create key pair**. Save `hireflow-key.pem` to your computer (e.g., in `C:\Users\<username>\.ssh\` or your Downloads folder).
-7. **Network settings:**
-   - Check **Allow SSH traffic from** &rarr; `Anywhere (0.0.0.0/0)` (or `My IP` for enhanced security).
-   - Check **Allow HTTP traffic from the internet** (Port 80).
-   - Check **Allow HTTPS traffic from the internet** (Port 443).
-8. **Configure storage:**
-   - `15 GiB` gp3 root volume (Free tier provides up to 30 GB EBS).
-9. Click **Launch instance**.
-10. Click on the new Instance ID. Note down your **Public IPv4 address** (e.g., `54.210.120.45`).
+   At the MySQL prompt, replace the password with a new strong value:
 
-#### 2. Connect to EC2 via SSH
-Open PowerShell on your local Windows machine (or Terminal on macOS/Linux):
+   ```sql
+   CREATE USER 'hireflow_app'@'%' IDENTIFIED BY 'REPLACE_WITH_A_STRONG_PASSWORD';
+   GRANT ALL PRIVILEGES ON resume_ats.* TO 'hireflow_app'@'%';
+   ```
+
+The RDS security group restricts which network can reach this database user.
+
+### Step 5: Connect to EC2 and Install the Runtime
+
+On Windows PowerShell, restrict access to the downloaded key and connect as `ec2-user` (the Amazon Linux default):
 
 ```powershell
-# 1. Navigate to the directory containing your downloaded .pem key file:
-cd C:\Users\<YourUsername>\Downloads
-
-# 2. On Windows, secure key file permissions (read-only for your user):
-icacls hireflow-key.pem /inheritance:r
-icacls hireflow-key.pem /grant:r "$($env:USERNAME):(R)"
-
-# (On Mac/Linux, you would run: chmod 400 hireflow-key.pem)
-
-# 3. Connect to your EC2 instance (replace with your EC2 Public IP):
-ssh -i hireflow-key.pem ubuntu@54.210.120.45
+icacls .\hireflow-key.pem /inheritance:r
+icacls .\hireflow-key.pem /grant:r "$($env:USERNAME):(R)"
+ssh -i .\hireflow-key.pem ec2-user@YOUR_EC2_PUBLIC_IP
 ```
 
-Type `yes` when prompted to verify host authenticity. You are now logged in as the `ubuntu` user on your AWS cloud server!
+On the EC2 shell, install Amazon Linux 2023 packages using `dnf`. AL2023 offers versioned PHP and Node.js packages; these examples use PHP 8.3 and Node.js 22, both compatible with this project:
 
----
-
-### Phase 5: Install Server Environment on EC2
-
-Run these commands in your SSH terminal on EC2 to install all necessary production software:
-
-#### 1. Update Packages & Add PHP PPA
 ```bash
-sudo apt update && sudo apt upgrade -y
+sudo dnf update -y
+sudo dnf install -y git nginx curl unzip tar gzip mariadb105 \
+  php8.3 php8.3-cli php8.3-fpm php8.3-mbstring php8.3-xml \
+  php8.3-bcmath php8.3-intl php8.3-mysqlnd php8.3-gd php8.3-zip \
+  nodejs22 nodejs22-npm python3 python3-pip awscli-2
 
-# Install essential build tools & utilities
-sudo apt install -y software-properties-common curl git unzip zip nginx awscli mysql-client
-
-# Add PHP PPA for PHP 8.3
-sudo add-apt-repository -y ppa:ondrej/php
-sudo apt update
-```
-
-#### 2. Install PHP 8.3 & Required Extensions
-```bash
-sudo apt install -y php8.3-fpm php8.3-cli php8.3-mysql php8.3-curl \
-    php8.3-gd php8.3-mbstring php8.3-xml php8.3-zip php8.3-bcmath php8.3-intl
-```
-
-#### 3. Install Composer (PHP Package Manager)
-```bash
-curl -sS https://getcomposer.org/installer | php
-sudo mv composer.phar /usr/local/bin/composer
-composer --version
-```
-
-#### 4. Install Node.js (v20 LTS) & npm
-```bash
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs
-node -v
-npm -v
-```
-
-#### 5. Install Python 3 & Virtual Environment
-```bash
-sudo apt install -y python3 python3-pip python3-venv
+php -v
+php -m
+node --version
+npm --version
 python3 --version
+aws --version
 ```
 
----
+If a versioned package is unavailable in your selected AMI, check `dnf search php8.3` or `dnf search nodejs22` and choose a supported package version; Laravel requires PHP `^8.2`. Install Composer from the [official Composer instructions](https://getcomposer.org/download/) and verify `composer --version`.
 
-### Phase 6: Deploy HireFlow Code to EC2
+### Step 6: Deploy the Repository and Configure Laravel
 
-#### 1. Clone the Project to `/var/www/hireflow`
 ```bash
 sudo mkdir -p /var/www/hireflow
-sudo chown -R ubuntu:ubuntu /var/www/hireflow
-
-# Clone your GitHub repository (replace with your repo URL):
-git clone https://github.com/<your-username>/<your-repo-name>.git /var/www/hireflow
+sudo chown ec2-user:nginx /var/www/hireflow
+git clone https://github.com/monishacd/AWS-based-applicant-tracking-system.git /var/www/hireflow
 cd /var/www/hireflow
 ```
 
----
+For a private repository, use a read-only deploy key; never put a personal access token in a clone URL or shell history. Build the React client on your development computer if the small EC2 instance runs out of memory:
 
-#### 2. Configure Laravel Backend & Connect to AWS RDS
+```powershell
+Set-Location frontend
+npm ci
+npm run build
+```
+
+Deploy the resulting `frontend/dist` with the application version.
+
+Create and edit the backend environment file:
 
 ```bash
 cd /var/www/hireflow/backend
-
-# Create production .env file
 cp .env.example .env
-
-# Open .env in nano editor
 nano .env
 ```
 
-Update the following keys in `backend/.env` with your AWS credentials:
+Set production values. Use the actual RDS endpoint and app database credentials; keep this file out of Git:
 
 ```dotenv
-APP_NAME="HireFlow ATS"
+APP_NAME="HireFlow"
 APP_ENV=production
 APP_DEBUG=false
-APP_URL=http://YOUR_EC2_PUBLIC_IP
+APP_URL=https://YOUR_DOMAIN
 
-# AWS RDS MySQL Connection Details
 DB_CONNECTION=mysql
-DB_HOST=hireflow-db.c3xxxxxx.us-east-1.rds.amazonaws.com
+DB_HOST=YOUR_RDS_ENDPOINT
 DB_PORT=3306
 DB_DATABASE=resume_ats
-DB_USERNAME=admin
-DB_PASSWORD=YourHireFlowPassword2026!
+DB_USERNAME=hireflow_app
+DB_PASSWORD=YOUR_APP_DATABASE_PASSWORD
 
-# Session & Frontend
 SESSION_DRIVER=database
-SANCTUM_STATEFUL_DOMAINS=YOUR_EC2_PUBLIC_IP
-FRONTEND_URL=http://YOUR_EC2_PUBLIC_IP
-CORS_ALLOWED_ORIGINS=http://YOUR_EC2_PUBLIC_IP
+SESSION_SECURE_COOKIE=true
+SANCTUM_STATEFUL_DOMAINS=YOUR_DOMAIN
+FRONTEND_URL=https://YOUR_DOMAIN
+CORS_ALLOWED_ORIGINS=https://YOUR_DOMAIN
 
-# AI Microservice URL running on EC2 localhost
 AI_SERVICE_URL=http://127.0.0.1:5001
-
-# File storage driver (configured in Phase 7)
-FILESYSTEM_DISK=s3
+FILESYSTEM_DISK=local
+MAIL_MAILER=log
 ```
 
-Press `Ctrl + O` then `Enter` to save, and `Ctrl + X` to exit `nano`.
+For a temporary HTTP smoke test without a domain, use the EC2 IP in the URL/origin settings, but do not upload real resumes or send credentials over public HTTP. Configure HTTPS before inviting users. Do not add AWS access keys; the EC2 role is used for S3 backups.
 
-Now install backend dependencies and run database migrations on RDS:
+Then install dependencies, create the application key **once**, migrate, and cache configuration:
 
 ```bash
-# Install PHP dependencies without dev packages
-composer install --no-dev --optimize-autoloader
-
-# Generate application key
-php artisan key:generate --force
-
-# Run database migrations directly against your AWS RDS instance!
-php artisan migrate --seed --force
-
-# Seed demo jobs (optional)
-# php artisan db:seed --class=DemoJobSeeder --force
-
-# Optimize Laravel cache for production
+composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader
+php artisan key:generate
+php artisan migrate --force --seed
 php artisan config:cache
 php artisan route:cache
-php artisan view:cache
-
-# Grant web server write permissions to storage & bootstrap/cache
-sudo chown -R ubuntu:www-data /var/www/hireflow/backend/storage
-sudo chown -R ubuntu:www-data /var/www/hireflow/backend/bootstrap/cache
-sudo chmod -R 775 /var/www/hireflow/backend/storage
-sudo chmod -R 775 /var/www/hireflow/backend/bootstrap/cache
 ```
 
----
+Do not run `key:generate` again on an existing installation; changing `APP_KEY` can invalidate encrypted data and sessions. `--seed` runs this repository's base seeders; it does not create recruiter or seeker accounts. Register accounts through the app and create/seed demo jobs only if desired.
 
-#### 3. Setup Python Flask AI Microservice as a Systemd Service
-
-Create a virtual environment and install Python dependencies:
+### Step 7: Run the Flask Service with systemd
 
 ```bash
 cd /var/www/hireflow/ai_services
-python3 -m venv venv
-source venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt gunicorn
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt gunicorn
 deactivate
 ```
 
-Create a `systemd` service so the Flask AI service automatically starts and restarts on server reboot:
-
-```bash
-sudo nano /etc/systemd/system/hireflow-ai.service
-```
-
-Paste the following service configuration:
+Create `/etc/systemd/system/hireflow-ai.service`:
 
 ```ini
 [Unit]
-Description=HireFlow Python AI Resume Parsing Microservice
+Description=HireFlow resume parsing service
 After=network.target
 
 [Service]
-User=ubuntu
-Group=www-data
+User=ec2-user
+Group=nginx
 WorkingDirectory=/var/www/hireflow/ai_services
-Environment="PATH=/var/www/hireflow/ai_services/venv/bin"
-Environment="PORT=5001"
-Environment="HOST=127.0.0.1"
-ExecStart=/var/www/hireflow/ai_services/venv/bin/gunicorn --workers 3 --bind 127.0.0.1:5001 app:app
-Restart=always
+Environment=HOST=127.0.0.1
+Environment=PORT=5001
+ExecStart=/var/www/hireflow/ai_services/.venv/bin/gunicorn --workers 1 --bind 127.0.0.1:5001 app:app
+Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Enable and start the service:
+The one-worker setting conserves memory on a small instance. Enable and check it:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable hireflow-ai
-sudo systemctl start hireflow-ai
-sudo systemctl status hireflow-ai
+sudo systemctl enable --now hireflow-ai
+curl http://127.0.0.1:5001/health
 ```
 
----
+Port 5001 stays on loopback and is not opened in the EC2 security group.
 
-#### 4. Build the React Frontend
+### Step 8: Configure PHP-FPM and Nginx
 
-```bash
-cd /var/www/hireflow/frontend
+Configure PHP-FPM's `www` pool (usually `/etc/php-fpm.d/www.conf`) to run as Nginx and listen on loopback:
 
-# Create production frontend environment
-nano .env
+```ini
+user = nginx
+group = nginx
+listen = 127.0.0.1:9000
 ```
 
-Add your EC2 public IP or domain:
-```dotenv
-VITE_BACKEND_URL=http://YOUR_EC2_PUBLIC_IP
-VITE_API_URL=/api
-```
-
-Build the static production assets:
-```bash
-npm install
-npm run build
-```
-
-This compiles optimized HTML, CSS, and JS files into `/var/www/hireflow/frontend/dist`.
-
----
-
-#### 5. Configure Nginx Web Server
-
-Create a unified Nginx configuration that:
-- Serves the React frontend on `/`.
-- Passes `/api` requests to PHP-FPM for Laravel.
-- Proxies `/ai/` requests to the Flask service on port `5001`.
-
-```bash
-sudo nano /etc/nginx/sites-available/hireflow
-```
-
-Paste the following Nginx configuration (replace `YOUR_EC2_PUBLIC_IP` with your actual EC2 public IP):
+Create `/etc/nginx/conf.d/hireflow.conf`:
 
 ```nginx
 server {
-    listen 80;
-    server_name YOUR_EC2_PUBLIC_IP;
-
-    client_max_body_size 20M;
-
-    # 1. React Frontend (Serve compiled dist files)
+    listen 80 default_server;
+    server_name _;
     root /var/www/hireflow/frontend/dist;
     index index.html;
+    client_max_body_size 12m;
 
     location / {
         try_files $uri $uri/ /index.html;
     }
 
-    # 2. Laravel Backend API
     location ^~ /api {
-        alias /var/www/hireflow/backend/public;
-        try_files $uri $uri/ @laravel;
-
-        location ~ \.php$ {
-            include fastcgi_params;
-            fastcgi_param SCRIPT_FILENAME /var/www/hireflow/backend/public/index.php;
-            fastcgi_pass unix:/run/php/php8.3-fpm.sock;
-            fastcgi_index index.php;
-        }
-    }
-
-    location @laravel {
-        rewrite /api/(.*)$ /api/index.php?/$1 last;
-    }
-
-    # 3. Direct PHP processing for Laravel public root
-    location ~ ^/backend/(.+\.php)$ {
-        alias /var/www/hireflow/backend/public/$1;
-        fastcgi_pass unix:/run/php/php8.3-fpm.sock;
         include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME /var/www/hireflow/backend/public/index.php;
+        fastcgi_param SCRIPT_NAME /index.php;
+        fastcgi_param DOCUMENT_ROOT /var/www/hireflow/backend/public;
+        fastcgi_param HTTP_AUTHORIZATION $http_authorization;
+        fastcgi_pass 127.0.0.1:9000;
     }
-
-    # 4. Logs
-    access_log /var/log/nginx/hireflow_access.log;
-    error_log /var/log/nginx/hireflow_error.log;
 }
 ```
 
-Enable the site and reload Nginx:
+Set Laravel write permissions, validate Nginx, and start services:
 
 ```bash
-sudo ln -sf /etc/nginx/sites-available/hireflow /etc/nginx/sites-enabled/
-sudo rm -f /etc/nginx/sites-enabled/default
+sudo chown -R ec2-user:nginx /var/www/hireflow
+sudo chown -R nginx:nginx /var/www/hireflow/backend/storage /var/www/hireflow/backend/bootstrap/cache
+sudo chmod -R ug+rwX /var/www/hireflow/backend/storage /var/www/hireflow/backend/bootstrap/cache
+sudo systemctl enable --now php-fpm nginx
 sudo nginx -t
 sudo systemctl reload nginx
 ```
 
-Visit `http://YOUR_EC2_PUBLIC_IP` in your browser. HireFlow is now live on the internet!
+The API is served through the same host as the React app; the Flask port is private. For a production rollout, point a domain to the EC2 public address, install and renew a trusted TLS certificate, set `APP_URL`/origins to HTTPS, rebuild the frontend with `VITE_API_URL=/api`, and verify HTTPS before handling real candidate information.
 
----
+### Step 9: Verify the Deployment
 
-### Phase 7: Store Uploaded Files in Amazon S3
+1. From EC2, check `curl http://127.0.0.1:5001/health` and `sudo systemctl status nginx php-fpm hireflow-ai`.
+2. In a browser, open `https://YOUR_DOMAIN/api/public/jobs` and the app home page.
+3. Register a recruiter, create a job, register a job seeker, upload a small test resume, apply, and confirm the application appears for the job-owning recruiter.
+4. Review `backend/storage/logs/laravel.log` and `sudo journalctl -u hireflow-ai` if a request fails.
+5. Confirm that 5001 and 3306 are not publicly reachable and that RDS remains non-public.
 
-Now configure Laravel to stream uploaded candidate resumes directly to your Amazon S3 bucket.
+### Step 10: Back Up RDS to S3 (Optional)
 
-#### 1. Install AWS S3 Flysystem Package in Laravel
-On your EC2 terminal:
-```bash
-cd /var/www/hireflow/backend
-composer require league/flysystem-aws-s3-v3 "^3.0" --update-no-dev
-```
-
-#### 2. Update Laravel `.env` with AWS S3 Credentials
-Open `backend/.env`:
-```bash
-nano .env
-```
-
-Add your S3 configuration and IAM user keys:
-```dotenv
-# Change default filesystem disk to s3
-FILESYSTEM_DISK=s3
-
-# AWS S3 Configuration
-AWS_ACCESS_KEY_ID=AKIAXXXXXXXXXXXXXXXX
-AWS_SECRET_ACCESS_KEY=your_secret_access_key_from_phase_1
-AWS_DEFAULT_REGION=us-east-1
-AWS_BUCKET=hireflow-resumes-storage-your-unique-suffix
-AWS_USE_PATH_STYLE_ENDPOINT=false
-```
-
-Clear and update configuration cache:
-```bash
-php artisan config:clear
-php artisan config:cache
-```
-
-#### 3. Verify S3 Resume Ingestion
-1. Log in as a job seeker on `http://YOUR_EC2_PUBLIC_IP/user/auth`.
-2. Go to **Resume & Skills** &rarr; upload a PDF resume.
-3. In your browser, open the [AWS S3 Console](https://s3.console.aws.amazon.com/).
-4. Click on `hireflow-resumes-storage-...` &rarr; click on the `resumes/` folder.
-5. You will see your newly uploaded resume file stored securely in the cloud!
-
----
-
-### Phase 8: Automated RDS Database Backups to Amazon S3
-
-Protect your database from data loss by automating daily snapshots and dumping compressed `.sql.gz` backups directly into Amazon S3.
-
-#### 1. Configure AWS CLI on EC2
-On your EC2 SSH session, configure the AWS credentials:
-```bash
-aws configure
-```
-Provide:
-- **AWS Access Key ID:** `AKIAXXXXXXXXXXXXXXXX` (from Phase 1)
-- **AWS Secret Access Key:** `your_secret_access_key`
-- **Default region name:** `us-east-1` (your chosen region)
-- **Default output format:** `json`
-
-Verify S3 access:
-```bash
-aws s3 ls
-```
-*(This will list your S3 buckets).*
-
----
-
-#### 2. Create the Database Backup Script
-Create a backup directory and script:
-```bash
-mkdir -p /home/ubuntu/scripts
-nano /home/ubuntu/scripts/backup_db_to_s3.sh
-```
-
-Paste the following automated backup script:
+RDS automated backups are managed by RDS and are **not** written into your S3 bucket. To create a separate SQL dump, install the MariaDB client if needed and store database credentials in a private client file rather than in a script:
 
 ```bash
-#!/bin/bash
-# ==============================================================================
-# HireFlow Automated RDS MySQL Backup to AWS S3
-# ==============================================================================
-
-# Configurations (Update these values)
-RDS_HOST="hireflow-db.c3xxxxxx.us-east-1.rds.amazonaws.com"
-DB_USER="admin"
-DB_PASS="YourHireFlowPassword2026!"
-DB_NAME="resume_ats"
-S3_BUCKET="s3://hireflow-database-backups-your-unique-suffix"
-
-# Timestamp & File Naming
-TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
-BACKUP_DIR="/tmp/hireflow_backups"
-FILENAME="resume_ats_backup_${TIMESTAMP}.sql.gz"
-FILEPATH="${BACKUP_DIR}/${FILENAME}"
-
-# Create temporary directory
-mkdir -p ${BACKUP_DIR}
-
-echo "[$(date)] Starting MySQL backup for ${DB_NAME}..."
-
-# Export database using mysqldump and compress with gzip
-mysqldump -h ${RDS_HOST} -u ${DB_USER} -p"${DB_PASS}" \
-    --single-transaction \
-    --quick \
-    --routines \
-    --triggers \
-    ${DB_NAME} | gzip > ${FILEPATH}
-
-# Check if dump succeeded
-if [ $? -eq 0 ]; then
-    echo "[$(date)] Backup completed successfully. Uploading to Amazon S3..."
-    
-    # Upload to Amazon S3
-    aws s3 cp ${FILEPATH} ${S3_BUCKET}/${FILENAME}
-    
-    if [ $? -eq 0 ]; then
-        echo "[$(date)] Successfully uploaded ${FILENAME} to ${S3_BUCKET}!"
-    else
-        echo "[$(date)] ERROR: Failed to upload backup to S3." >&2
-    fi
-else
-    echo "[$(date)] ERROR: mysqldump failed." >&2
-fi
-
-# Clean up local temporary file
-rm -f ${FILEPATH}
-echo "[$(date)] Backup cleanup completed."
+sudo dnf install -y mariadb105
+nano /home/ec2-user/.my.cnf
 ```
 
-Make the script executable:
-```bash
-chmod +x /home/ubuntu/scripts/backup_db_to_s3.sh
+```ini
+[client]
+host=YOUR_RDS_ENDPOINT
+user=hireflow_app
+password=YOUR_APP_DATABASE_PASSWORD
 ```
 
----
-
-#### 3. Test the Backup Script Manually
-Run the script to verify that it exports the database and uploads it to S3:
 ```bash
-/home/ubuntu/scripts/backup_db_to_s3.sh
+chmod 600 /home/ec2-user/.my.cnf
+mkdir -p /home/ec2-user/scripts
+nano /home/ec2-user/scripts/backup-db-to-s3.sh
 ```
 
-Check your S3 bucket in the AWS Console or via CLI:
+Use the following script, replacing the bucket and Region:
+
 ```bash
-aws s3 ls s3://hireflow-database-backups-your-unique-suffix/
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+bucket="hireflow-db-backups-<unique-suffix>"
+region="YOUR_AWS_REGION"
+tmp_dir="$(mktemp -d)"
+trap 'rm -rf "$tmp_dir"' EXIT
+file="$tmp_dir/resume_ats-$(date -u +%Y%m%dT%H%M%SZ).sql.gz"
+
+mysqldump --defaults-extra-file=/home/ec2-user/.my.cnf \
+  --single-transaction --quick --routines --triggers resume_ats | gzip > "$file"
+aws s3 cp "$file" "s3://${bucket}/database/$(basename "$file")" \
+  --region "$region" --sse AES256
 ```
-You should see:
-`2026-10-28 14:45:00  15320 resume_ats_backup_2026-10-28_14-45-00.sql.gz`
 
----
+Run and verify one backup before scheduling it:
 
-#### 4. Schedule Automated Daily Backups with Cron
-Open the crontab editor:
 ```bash
+chmod 700 /home/ec2-user/scripts/backup-db-to-s3.sh
+/home/ec2-user/scripts/backup-db-to-s3.sh
+aws s3 ls s3://hireflow-db-backups-<unique-suffix>/database/ --region YOUR_AWS_REGION
+```
+
+The AWS CLI uses the EC2 role; do not add `aws configure` credentials. For daily scheduling, enable `cronie` and add a cron entry under `ec2-user` (not root):
+
+```bash
+sudo dnf install -y cronie
+sudo systemctl enable --now crond
 crontab -e
 ```
-*(If prompted, choose `1` for nano).*
 
-Add this line at the bottom to automatically take a database backup **every night at 2:00 AM UTC**:
+Example daily schedule:
+
 ```cron
-0 2 * * * /home/ubuntu/scripts/backup_db_to_s3.sh >> /home/ubuntu/scripts/backup.log 2>&1
+0 3 * * * /home/ec2-user/scripts/backup-db-to-s3.sh >> /home/ec2-user/backup.log 2>&1
 ```
-Save and exit (`Ctrl + O`, `Enter`, `Ctrl + X`).
+
+Test restores periodically in a separate database. A backup that has never been restored is not a verified recovery plan.
+
+### Step 11: HTTPS, Cost Review, and Cleanup
+
+- Use a domain name and a valid TLS certificate before handling real resumes, passwords, or candidate data. Domain registration, DNS, a static public IPv4 address, and certificate termination can have separate costs.
+- Check the AWS Billing console and budget alerts while testing. Credits and Free Tier limits are account-specific and may expire.
+- When finished, back up data you need, then delete test EC2/RDS resources, detached EBS volumes/snapshots, unused public IPv4 addresses, and S3 objects/buckets. Deleting a database or bucket is destructive; verify the backups before cleanup.
 
 ---
 
-#### 5. How to Restore Database from S3 (Disaster Recovery)
-If you ever need to restore your database from an S3 backup:
-```bash
-# 1. Download the latest backup from S3:
-aws s3 cp s3://hireflow-database-backups-your-unique-suffix/resume_ats_backup_YYYY-MM-DD_HH-MM-SS.sql.gz /tmp/backup.sql.gz
 
-# 2. Decompress the file:
-gunzip /tmp/backup.sql.gz
+## 🏗️ System Architecture and Application Flow
 
-# 3. Import back into AWS RDS MySQL:
-mysql -h hireflow-db.c3xxxxxx.us-east-1.rds.amazonaws.com -u admin -p resume_ats < /tmp/backup.sql
+```mermaid
+flowchart LR
+    U[Recruiter or job seeker browser] -->|local: Vite / production: Nginx| FE[React 18 client]
+    FE -->|JSON API + Sanctum token| API[Laravel 12 API]
+    API --> DB[(MySQL: users, jobs, resumes metadata, applications, matches, interviews)]
+    API -->|local HTTP, optional parsing flow| AI[Flask resume service]
+    API -->|PDF/DOCX text extraction and fallback matching| PHP[Laravel services]
+    API -->|private local storage| FILES[EC2 EBS or local disk: resume files]
+    BACKUP[EC2 scheduled database dump] -->|EC2 IAM role| S3[(Private S3 backup bucket)]
+    BACKUP --> DB
 ```
 
----
+In development, Vite serves the frontend on port 5173, Laravel serves the API on port 8000, and the optional Flask service listens on port 5001. In the AWS guide, Nginx serves the built React app and passes `/api` requests to PHP-FPM; Flask listens only on `127.0.0.1:5001`. RDS and S3 are not exposed as public application endpoints.
 
-### Phase 9: Free SSL Certificate (HTTPS) with Certbot
+### Application Flow
 
-To secure your production app with `https://`:
-
-1. Point your domain (e.g. `hireflow.yourdomain.com`) to your EC2 Public IP using an **A Record** in your DNS provider (e.g., Route 53, GoDaddy, Cloudflare, Namecheap).
-2. On your EC2 server, install Certbot:
-   ```bash
-   sudo apt install -y certbot python3-certbot-nginx
-   ```
-3. Run Certbot to automatically configure SSL:
-   ```bash
-   sudo certbot --nginx -d hireflow.yourdomain.com
-   ```
-4. Enter your email and accept terms. Certbot will automatically issue and install a Let's Encrypt SSL certificate and configure HTTPS redirection!
-5. Test automatic certificate renewal:
-   ```bash
-   sudo certbot renew --dry-run
-   ```
-
----
-
-## 🏗️ System Architecture
-
-```text
-               +--------------------------------------------------+
-               |            React 18 + Vite (Port 5173)           |
-               |  - Recruiter Workspace   - Job Seeker Dashboard  |
-               |  - Interactive Charts    - Application Tracker   |
-               +-------------------------+------------------------+
-                                         | Bearer Token (Sanctum)
-                                         v
-               +--------------------------------------------------+
-               |           Laravel 12 API (Port 8000)             |
-               |  - Sanctum Auth          - Role-based Gates      |
-               |  - Job Management        - Application Workflow  |
-               |  - AWS S3 Storage        - Fallback Skill Engine |
-               +-------------------+---------------+--------------+
-                                   |               |
-             AWS S3 Storage Disk   |               | HTTP Ingestion
-       (s3://hireflow-resumes)     |               v
-                                   |    +-------------------------+
-                                   |    |  Flask AI (Port 5001)   |
-                                   |    |  - PyPDF / python-docx  |
-                                   |    |  - Skill Extraction     |
-                                   |    |  - Vector Overlap Match |
-                                   |    +-------------------------+
-                                   v
-               +--------------------------------------------------+
-               |          Amazon RDS MySQL 8.0 (Port 3306)        |
-               |  - users, candidates, jobs, applications,        |
-               |    matches, skills, personal_access_tokens       |
-               +--------------------------------------------------+
+```mermaid
+flowchart TD
+    Browser[Recruiter or job seeker] --> Client[React web client]
+    Client --> Auth[Laravel API: authenticate and authorize role]
+    Auth --> Role{User role}
+    Role -->|Recruiter| JobSetup[Create and manage job postings]
+    JobSetup --> Jobs[(MySQL jobs)]
+    Role -->|Job seeker| Resume[Upload resume or use saved profile]
+    Resume --> Store[Save resume on private local disk]
+    Store --> Parse[Extract resume text and skills]
+    Parse --> Profile[(MySQL candidate profile)]
+    Jobs --> Discovery[Browse open jobs]
+    Profile --> Discovery
+    Discovery --> Apply[Apply to a job]
+    Apply --> Match[Compare resume/profile skills with job requirements]
+    Match --> Records[(MySQL application and match records)]
+    Records --> Review[Recruiter reviews candidate and updates status]
+    Review --> Interview[Schedule interview or publish outcome]
+    Interview --> Notify[In-app notification and candidate update]
 ```
+
+For recruiter-led resume screening, Laravel can also call the optional Flask service; if it is unavailable, the PHP matcher provides a fallback. That screening path records candidate and job-match data for recruiter review.
+
+1. **Authentication and roles:** Users register or sign in through Laravel. Sanctum issues the API token; backend role middleware protects recruiter and job-seeker routes.
+2. **Recruiter job posting:** Recruiters create and manage jobs. Laravel persists jobs in MySQL, and the public job board returns eligible open postings.
+3. **Resume upload and parsing:** A job seeker uploads a PDF/DOC/DOCX resume (maximum 10 MB). The current application stores it on the private local disk and extracts text using the PHP `ResumeParserService`.
+4. **Job application:** The seeker applies to an open job. Laravel creates an application linked to that job and candidate, then calculates a skills-overlap score with the PHP `LocalAiMatcher`.
+5. **Recruiter review:** Recruiters view applicants for jobs they own or share access to, review extracted fields and scores, add notes, and change application status.
+6. **Interviews and offers:** Recruiters schedule/update interviews and publish outcomes. The candidate receives an authenticated in-app notification and can review or respond to an offer.
+7. **Optional recruiter resume screening:** The recruiter-side resume status workflow can call the Flask service for parsing and matching; Laravel has a local PHP fallback if that service is unavailable.
+8. **Database backup:** On AWS, an optional scheduled `mysqldump` runs from EC2 and uploads the dump to a private S3 bucket using the EC2 role. Resume files are not sent to S3 by the current controllers.
 
 ---
 
@@ -958,15 +659,38 @@ To secure your production app with `https://`:
 
 ---
 
-## 🤖 Explainable AI Matching Algorithm
+## 🤖 Explainable Skill-Overlap Matching
 
-HireFlow eliminates hiring bias by avoiding opaque black-box machine learning models for initial candidate screening:
-1. **Verified Skill Overlap:** Matches candidate verified skills against explicit job requirements.
-   $$\text{Match Percentage} = \left( \frac{|\text{Candidate Verified Skills} \cap \text{Job Required Skills}|}{|\text{Job Required Skills}|} \right) \times 100$$
-2. **Transparent Explanations:** Candidates and recruiters receive a clear breakdown of:
-   - **Matched Skills:** Identified directly from candidate work history and certifications.
-   - **Skills to Develop:** Missing required skills for candidate career growth.
-3. **No Biased Scoring:** Age, gender, ethnicity, location, and non-skill attributes are strictly excluded from match calculations.
+This application does not call a large language model or train a machine-learning model for its match percentage. The Laravel fallback and Python service compare recognized skill terms in the resume text with the job's explicit required skills. If a job has no explicit skill list, the service may infer terms from the title/description's known-skill dictionary.
+
+The score is a heuristic:
+
+```text
+match percentage = matched required skill terms / total required skill terms * 100
+```
+
+The scoring workflow is:
+
+```mermaid
+flowchart TD
+    Resume[Resume file] --> Text[Extract readable text and recognized skills]
+    Job[Job title, description, and required skills] --> HasSkills{Explicit required skills?}
+    HasSkills -->|Yes| Required[Use the listed required skills]
+    HasSkills -->|No| Infer[Infer recognized skills from title and description]
+    Text --> Compare[Case-insensitive, word-boundary skill comparison]
+    Required --> Compare
+    Infer --> Compare
+    Compare --> Explain[Collect matched and missing skills]
+    Explain --> AnyRequired{Any skills to compare?}
+    AnyRequired -->|Yes| Score[Round matched skills / required skills x 100]
+    AnyRequired -->|No| NoScore[Return 0 and explain no score is available]
+    Score --> Result[Persist match details for recommendations or recruiter review]
+    NoScore --> Result
+```
+
+Job-seeker resume parsing and recommendations use Laravel's PHP services. Recruiter resume screening can use the Flask service, with a PHP fallback. Neither path uses a trained model, large language model, embeddings, or semantic inference for the percentage.
+
+The response includes matched and missing terms to make the score inspectable. Resume parsing and keyword matching can be incomplete or incorrect; the percentage is not a verified qualification, a measure of candidate quality, or a hiring decision. Recruiters should review resumes and use fair, job-related criteria.
 
 ---
 
@@ -1036,8 +760,7 @@ Applicant tracking/
 │   └── vite.config.js        # Vite config with API proxy
 ├── ai_services/              # Python Flask Microservice
 │   ├── app.py                # Resume text extraction & skill matching
-│   └── requirements.txt      # PyPDF, python-docx, Flask, Flask-CORS, Gunicorn
-└── screenshots/              # Application preview illustrations & mockups
+│   └── requirements.txt      # Flask, Flask-CORS, pypdf, python-docx
 ```
 
 ---
@@ -1052,18 +775,18 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
 
 ### 2. EC2 cannot connect to AWS RDS (`Connection timed out` or `Access denied`)
-- Ensure the **Security Group of your RDS instance** has an inbound rule allowing port `3306` from your EC2 Security Group ID (or `0.0.0.0/0`).
+- Ensure the **RDS security group** allows inbound TCP `3306` from the EC2 security group only. Do not expose MySQL to `0.0.0.0/0`.
 - Verify that `DB_HOST` in `backend/.env` is the exact RDS Endpoint URL without `http://` or port.
 - Test connection directly from EC2 terminal:
   ```bash
-  mysql -h your-rds-endpoint.rds.amazonaws.com -u admin -p
+  mysql -h your-rds-endpoint.rds.amazonaws.com -u hireflow_app -p
   ```
 
-### 3. S3 file upload gives `Access Denied (403 Forbidden)`
-- Verify that your IAM user has `AmazonS3FullAccess` attached.
-- Double-check `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in `backend/.env`.
-- Ensure `AWS_DEFAULT_REGION` matches the region where your S3 bucket was created.
-- Run `php artisan config:clear` on EC2 to refresh cached settings.
+### 3. S3 database backup gives `Access Denied`
+- Confirm the EC2 instance has the `HireFlowEC2Role` IAM role attached and its policy permits access to the configured bucket's `database/` prefix.
+- Verify that the bucket name and Region in the backup script match the S3 bucket.
+- Check the EC2 role credentials with `aws sts get-caller-identity`; do not add long-lived IAM access keys to `.env` or run `aws configure`.
+- Review the command output and the EC2 role's CloudTrail/IAM permissions if access is still denied.
 
 ### 4. Vite cannot connect to backend (`Failed to fetch / 500`)
 - Confirm Laravel is running on port 8000 locally: `php artisan serve --port 8000`.
